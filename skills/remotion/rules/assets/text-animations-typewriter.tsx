@@ -1,3 +1,4 @@
+import React from 'react';
 import {
 	AbsoluteFill,
 	interpolate,
@@ -7,8 +8,6 @@ import {
 
 const COLOR_BG = '#ffffff';
 const COLOR_TEXT = '#000000';
-const FULL_TEXT = 'From prompt to motion graphics. This is Remotion.';
-const PAUSE_AFTER = 'From prompt to motion graphics.';
 const FONT_SIZE = 72;
 const FONT_WEIGHT = 700;
 const CHAR_FRAMES = 2;
@@ -64,7 +63,10 @@ const Cursor: React.FC<{
 	return <span style={{opacity}}>{symbol}</span>;
 };
 
-export const MyAnimation = () => {
+export const MyAnimation: React.FC<{
+	fullText: string;
+	pauseAfter: string;
+}> = ({fullText, pauseAfter}) => {
 	const frame = useCurrentFrame();
 	const {fps} = useVideoConfig();
 
@@ -72,8 +74,8 @@ export const MyAnimation = () => {
 
 	const typedText = getTypedText({
 		frame,
-		fullText: FULL_TEXT,
-		pauseAfter: PAUSE_AFTER,
+		fullText,
+		pauseAfter,
 		charFrames: CHAR_FRAMES,
 		pauseFrames,
 	});
