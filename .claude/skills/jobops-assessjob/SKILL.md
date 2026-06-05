@@ -1,0 +1,564 @@
+---
+name: assessjob
+description: Perform expert HR assessment of candidate against job posting with domain knowledge
+disable-model-invocation: true
+---
+
+## Configuration
+
+Read `.jobops/config.json`. If missing, stop with:
+
+> JOBOPS NOT CONFIGURED
+> Run /jobops:setup to initialize your workspace.
+
+Use `config.directories.<key>` for all file paths in this skill.
+Use `config.preferences.cultural_profile` if this skill generates resume-style content.
+Use `config.preferences.default_jurisdiction` if this skill has jurisdiction-sensitive logic (crisis/legal skills accept `--jurisdiction=<ISO-3166-2>` to override).
+
+## Templates
+
+For each template used by this skill, resolve the full path as:
+
+  {config.templates.base_dir}/{config.templates.active.<template_name>}/<filename>
+
+Templates referenced by this skill: assessment_rubric_framework, assessment_report_structure
+
+## Application Path Resolution
+
+This skill writes to a per-application folder. Before writing any output:
+
+1. Parse `{Company}_{Role}_{YYYYMMDD}` from the job-posting filename, or honor `--app=<slug>` if supplied. The slug MUST be canonical: a **leading** PascalCase `{Company}` token (matching the `Company_Intelligence/{Company}/` folder so OSINT links), a PascalCase `{Role}` (underscores between words allowed), and a **trailing** compact 8-digit date (`20260519` — no hyphens, no time). Reject leading date/time prefixes such as `2026-04-15_214414_...`; if the source filename carries one, recompose it into canonical form (`{Company}_{Role}_{YYYYMMDD}`) before composing the folder path.
+2. Compose the app folder: `{config.directories.applications_root}/{app_slug}/`.
+3. Resolve this skill's sub-folder by category:
+   - resume-development (buildresume, provenance-check) → `resume/`
+   - cover-letter (coverletter) → `cover-letter/`
+   - rubric / assessment (createrubric, assessjob, assesscandidate, auditjobposting) → `assessment/`
+   - briefing / interview prep (briefing, interviewprep) → `interview/`
+4. If the app folder does not exist, `mkdir -p` it, then copy
+   `{config.directories.job_postings}/{filename}` → `{app_slug}/job_posting.md`
+   so the pinned JD cannot silently change under completed work. Ensure the pinned copy
+   begins with YAML front matter carrying `output_type: job_posting`: if the source JD
+   already has a front-matter block, add the key to it; otherwise wrap a new block
+   (`---` / `output_type: job_posting` / `source_jd: {filename}` / `---`) above the JD body.
+5. Exact-slug collisions (same Company+Role+Date) are not auto-suffixed. If the folder
+   already contains the same output type, require the user to pass `--app=<distinct-slug>`.
+6. **Output filenames** (fixed; only the sub-folder above is resolved dynamically): `assessment/rubric.md`, `assessment/assessment.md`, and `assessment/domain_research.md`.
+
+## CRITICAL OUTPUT CONSTRAINT
+
+**MAXIMUM ASSESSMENT REPORT LIMIT: 20,000 TOKENS**
+
+Your assessment report output MUST NOT EXCEED 20,000 tokens. This is a hard limit.
+
+**Important Clarifications:**
+- **Rubric**: Must include ALL mandatory detailed scoring breakdowns (no token limit - completeness required)
+- **Assessment Report**: MUST stay within 20,000 token limit (this is the constraint)
+
+**Strategies to stay within limit for assessment report:**
+- Be concise and focused in your analysis
+- Use bullet points instead of lengthy paragraphs where appropriate
+- Prioritize evidence-based scoring over verbose explanations
+- Keep executive summary brief (2-3 sentences maximum)
+- Focus on the most impactful evidence for each score
+- Eliminate redundancy across sections
+
+## Your Task
+
+Create a job-specific scoring rubric from the {{ARG1}} job posting, then evaluate the candidate using this customized rubric to provide a detailed assessment report.
+
+**Resume Source Location:**
+- If {{ARG2}} is provided: Use {{ARG2}} as the resume source (file or folder)
+- If {{ARG2}} is not provided: Default to `{config.directories.resume_source}`
+
+---
+
+## WORKFLOW ARCHITECTURE
+
+**This workflow uses 5 phases with parallel dispatch where possible.**
+
+```
+Phase 1 (Sequential, fast):     Load templates + Validate inputs + Load job posting
+Phase 2 (PARALLEL subagents):   Domain Research ‖ Source Reading
+Phase 3 (Sequential):           Create Rubric (synthesizes job posting + domain research)
+Phase 4 (Sequential, visible):  Score Cat 1 → 2 → 3 → 4 → 5
+Phase 5 (Sequential):           Generate Report → Save Files
+```
+
+**Dependency Rules:**
+- Phase 2 starts after job posting is loaded (Phase 1)
+- Phase 2 tasks are INDEPENDENT of each other - dispatch simultaneously
+- Phase 3 WAITS for domain research results from Phase 2
+- Phase 4 WAITS for rubric (Phase 3) AND source reading (Phase 2)
+- Phase 5 WAITS for all scoring (Phase 4)
+
+---
+
+## PROGRESS TRACKING (MANDATORY)
+
+**Before starting any work**, create all tasks for user visibility. Use TaskCreate for each task below, then use TaskUpdate to mark `in_progress` when starting and `completed` when done.
+
+Create these tasks immediately at the start:
+
+| # | Task Subject | activeForm | Phase |
+|---|-------------|------------|-------|
+| 1 | Load assessment framework templates | Loading assessment framework templates | 1 |
+| 2 | Validate job posting and resume source | Validating job posting and resume source | 1 |
+| 3 | Read candidate source materials | Reading candidate source materials | 2 |
+| 4 | Research domain context and save findings | Researching domain and industry context | 2 |
+| 5 | Create job-specific scoring rubric | Creating job-specific scoring rubric | 3 |
+| 6 | Score Skills Inventory (Category 1) | Scoring Skills Inventory against rubric | 4 |
+| 7 | Score Experience Relevance (Category 2) | Scoring Experience Relevance against rubric | 4 |
+| 8 | Score Demonstrated Impact (Category 3) | Scoring Demonstrated Impact against rubric | 4 |
+| 9 | Score Credentials (Category 4) | Scoring Credentials against rubric | 4 |
+| 10 | Score Fit & Readiness (Category 5) | Scoring Fit & Readiness against rubric | 4 |
+| 11 | Generate assessment report | Generating comprehensive assessment report | 5 |
+| 12 | Save rubric and assessment files | Saving rubric and assessment files | 5 |
+
+**Task Update Rules:**
+- Mark each task `in_progress` BEFORE starting work on it
+- Mark each task `completed` AFTER finishing it
+- If a task completes quickly (e.g., task 3 when source is a single file already read in Phase 1), mark it `completed` with a note
+
+---
+
+## YAML FRONT MATTER FOR GENERATED FILES
+
+Every markdown artifact you create (domain research, rubric, and assessment report) must start with YAML metadata populated with real values.
+
+- **Domain research file** (`{applications_root}/{app_slug}/assessment/domain_research.md`):
+  ```yaml
+  ---
+  job_file: {config.directories.job_postings}/{{ARG1}}
+  role: <role title>
+  company: <company name>
+  generated_by: /assessjob domain-research
+  generated_on: <ISO8601 timestamp>
+  output_type: domain_research
+  status: final
+  version: 2.0
+  ---
+  ```
+- **Rubric file** (`{applications_root}/{app_slug}/assessment/rubric.md`):
+  ```yaml
+  ---
+  job_file: {config.directories.job_postings}/{{ARG1}}
+  role: <role title>
+  company: <company name>
+  role_variant: <Technical IC | People Manager | Executive>
+  total_points: 200
+  generated_by: /assessjob rubric
+  generated_on: <ISO8601 timestamp>
+  output_type: rubric
+  status: final
+  version: 2.0
+  ---
+  ```
+- **Assessment file** (`{applications_root}/{app_slug}/assessment/assessment.md`):
+  ```yaml
+  ---
+  job_file: {config.directories.job_postings}/{{ARG1}}
+  resume_source: {{ARG2}} or {config.directories.resume_source}
+  rubric_file: {applications_root}/{app_slug}/assessment/rubric.md
+  role: <role title>
+  company: <company name>
+  role_variant: <Technical IC | People Manager | Executive>
+  candidate: <full candidate name>
+  generated_by: /assessjob
+  generated_on: <ISO8601 timestamp>
+  output_type: assessment
+  status: draft
+  version: 2.0
+  overall_score: <XX/200>
+  normalized_score: <XX%>
+  ---
+  ```
+
+Insert the appropriate block before any headings, updating timestamps and scores, and bump `version` if you rerun the analysis.
+
+---
+
+## PHASE 1: INITIALIZATION (Sequential)
+
+> **Tasks:** Mark task 1 `in_progress`, then task 2 `in_progress` after templates load.
+
+### 1.1 Load Required Templates
+
+**CRITICAL: Read all three framework templates in a single parallel batch:**
+- `{config.templates.base_dir}/{config.templates.active[assessment_rubric_framework]}/assessment_rubric_framework.md` - Master 200-point rubric structure with role variants
+- `{config.templates.base_dir}/{config.templates.active[evidence_verification_framework]}/evidence_verification_framework.md` - Evidence-based scoring protocols
+- `{config.templates.base_dir}/{config.templates.active[assessment_report_structure]}/assessment_report_structure.md` - Assessment report format
+
+Use three parallel Read tool calls. These templates define the mandatory structure for rubrics and assessments.
+
+> **Task:** Mark task 1 `completed`.
+
+### 1.2 Validate Inputs and Load Job Posting
+
+> **Task:** Mark task 2 `in_progress`.
+
+**Resume Source Path Resolution:**
+
+1. **Determine source path**:
+   - If {{ARG2}} is provided: Use the specified path
+   - If {{ARG2}} is not provided: Default to `{config.directories.resume_source}`
+
+2. **Legacy Candidate Profile Artifact Check**:
+   - Let `source_path` be the resolved resume source path from step 1.
+   - If `source_path` is a single-file source named `candidate_profile.json`, stop before assessment. Tell the candidate this legacy JSON profile is deprecated and assessments now read source markdown directly. Instruct the candidate to delete the deprecated file and provide a source markdown file or folder instead. Offer to delete the legacy file for them.
+   - If `source_path` is a directory, check for these legacy artifacts before reading candidate materials:
+     - `{source_path}/.profile/candidate_profile.json`
+     - `{source_path}/candidate_profile.json`
+   - If either legacy artifact exists, stop before assessment. List the exact file path(s), tell the candidate each deprecated candidate profile JSON file must be deleted because JobOps now reads source markdown directly, and offer to delete the legacy artifact(s) for them.
+   - If the candidate approves deletion, delete only the listed legacy artifact file(s), re-run this check, then continue only if no legacy profile artifact remains.
+   - Never load, summarize, or score from `candidate_profile.json`.
+
+3. **Validate source path**:
+   - If path is a file: Read the single resume file directly in Phase 2 — this is the only candidate source you have
+   - If path is a directory: Phase 2 reads the canonical source files (Identity, Technology, WorkHistory, etc.) from this directory
+   - If path doesn't exist: Report error and halt
+
+4. **Load job posting**:
+   - Read the job posting from `{config.directories.job_postings}/{{ARG1}}` (add .md extension if needed)
+   - If not found, report error and suggest available alternatives
+
+> **Task:** Mark task 2 `completed`.
+
+---
+
+## PHASE 2: SOURCE READING & DOMAIN RESEARCH
+
+> **CRITICAL: Dispatch the §2.2 subagent BEFORE starting §2.1's reads so both run concurrently.**
+> Mark tasks 3 and 4 as `in_progress` before beginning.
+
+Phase 2 combines direct in-session source reads (§2.1) with a parallel domain-research subagent (§2.2). §2.1 requires no subagent — you perform the reads yourself. §2.2 dispatches a Task subagent. Both need only the job posting content (loaded in Phase 1).
+
+### Legacy Candidate Profile Artifact Check
+
+This check was completed in Phase 1 before candidate source reads. Do not skip it if Phase 2 is restarted.
+
+### 2.1 Read Candidate Source Materials (Task 3)
+
+Determine source structure:
+- **Single-file source** (resume.md or similar passed by user): read that file directly. Skip everything below; you have the candidate data in-hand.
+- **Folder source** (`{config.directories.resume_source}/`): read these files directly for the rubric scoring you are about to do:
+  - `Identity/Name.md`, `Identity/CurrentRole.md` (candidate identity)
+  - `Technology/TechStack.md` (skill inventory)
+  - `Technology/Certifications.md` (active credentials)
+  - `WorkHistory/*.md` (roles, achievements, scope)
+  - `Projects/*.md` if present (case studies)
+  - `Education/*.md` if present
+  - `Preferences/Vision.md` (cultural-fit signals)
+
+If a required file is missing, prompt the user to run `/jobops:audit-source` and stop. Do NOT attempt to generate or load `candidate_profile.json` — that artifact is removed in v2.2.0.
+
+Token budget: most rubric scoring needs ~30K of source markdown loaded at once for a thorough assessment. Read what you need; do not pre-summarize.
+
+### 2.2 Research Domain and Industry Context (Task 4)
+
+**Dispatch a domain research subagent** to run concurrently with the in-session source reads (§2.1):
+
+```
+Use Task tool with subagent_type=general-purpose, model=sonnet, and prompt:
+"Research the following for the role of [ROLE TITLE] at [COMPANY NAME]:
+
+1. Industry standards and typical role expectations for this specific position
+2. Required vs nice-to-have skills based on current market standards
+3. Typical responsibilities and seniority indicators for this role level
+4. Company context: culture, values, technology stack, recent developments, size, reputation
+5. Current market conditions: salary ranges, demand, competitive landscape
+6. Industry-specific terminology, certifications, and best practices
+7. What differentiates strong vs average candidates for this type of role
+
+Provide a structured research summary organized by these 7 areas.
+Focus on actionable intelligence that would help calibrate a scoring rubric.
+Be specific - cite sources and data points where possible."
+```
+
+**IMPORTANT**: §2.1 (source reading) is done in-session via direct Read tool calls — it is NOT a subagent dispatch. §2.2 (domain research) is a Task tool subagent dispatch. Dispatch §2.2 BEFORE starting §2.1's reads so the two run concurrently — do not wait for §2.1's reads to complete before launching the §2.2 subagent.
+
+### 2.2.1 Persist Domain Research (Task 4)
+
+As soon as the §2.2 subagent returns, save its findings **verbatim** — do not summarize, paraphrase, or trim. The raw research (including the 7-area structure and any cited sources or data points) is the audit record; the rubric captures only its *effect* on calibration, not the underlying evidence. Save now, in Phase 2, rather than deferring to Phase 5, so the full text is preserved before the scoring phases crowd it out of context and so the artifact survives a failure in a later phase.
+
+1. Resolve `{app_slug}` per the Application Path Resolution protocol at the top of this skill. This is the first write of the run, so it triggers folder creation: `mkdir -p {applications_root}/{app_slug}/assessment/`, then pin the JD — copy `{config.directories.job_postings}/{{ARG1}}` → `{applications_root}/{app_slug}/job_posting.md` if not already present.
+2. Write the subagent's full structured summary to `{applications_root}/{app_slug}/assessment/domain_research.md`, prepended with the **Domain research file** YAML front matter block defined above.
+3. Preserve the 7-area organization and every source citation exactly as returned by the subagent.
+
+> **Task:** When the §2.1 reads complete, mark task 3 `completed`. Mark task 4 `completed` only after the research file is written in §2.2.1.
+
+---
+
+## PHASE 3: CREATE RUBRIC (Sequential - needs Phase 2 domain research)
+
+> **Task:** Mark task 5 `in_progress`.
+> **Prerequisite:** Domain research (task 4) must be `completed`. Source reading (task 3) is NOT needed yet.
+
+### 3.1 Synthesize Job Posting + Domain Research
+
+Combine the job posting requirements with domain research findings to create an informed rubric. The domain research helps you:
+- Set appropriate proficiency thresholds calibrated to industry standards
+- Weight skills correctly based on market reality (not just posting emphasis)
+- Identify implicit requirements the posting may not state explicitly
+- Calibrate experience expectations to the seniority level
+- Set realistic achievement thresholds for the industry/company size
+
+### 3.2 Determine Role Variant
+
+Analyze the job posting to select the appropriate weight variant:
+
+**Technical Individual Contributor** - Select if:
+- Role is hands-on technical work (engineer, analyst, specialist)
+- No direct reports mentioned
+- Technical skills are primary focus
+
+**People Manager** - Select if:
+- Direct reports or team leadership mentioned
+- Performance management, hiring, or development responsibilities
+- "Manager", "Director", "Lead" with team oversight
+
+**Executive** - Select if:
+- Strategic/organizational scope
+- P&L or budget authority
+- Cross-functional leadership
+- "VP", "C-level", "Executive Director", "Head of"
+
+Document selected variant in rubric header.
+
+### 3.3 Parse Job Posting Requirements
+
+Extract and categorize:
+- **Required Technical Skills**: All must-have technical competencies
+- **Preferred Skills**: Nice-to-have skills and technologies
+- **Experience Requirements**: Years, industry, domain specifics
+- **Key Responsibilities**: Primary duties and scope expectations
+- **Education/Certifications**: Required and preferred credentials
+- **Soft Skills/Cultural Fit**: Communication, collaboration, values
+
+### 3.4 Generate Custom Rubric Structure
+
+**MANDATORY DETAILED SCORING REQUIREMENT**
+The dynamic rubric you create MUST include granular point allocation for every single criterion. This is NON-NEGOTIABLE. You cannot create simplified rubrics or skip detailed breakdowns. Every skill, every experience level, every responsibility MUST have the complete scoring framework with specific, measurable criteria.
+
+**CRITICAL REQUIREMENT**: Follow the structure defined in the assessment rubric framework template exactly. Customize all `[bracketed]` content with job-specific requirements from the job posting, informed by domain research findings.
+
+**200-Point Scoring Categories (Default Weights):**
+1. **Skills Inventory (50 pts / 25%)** - Technical and professional competencies scored on 0-6 proficiency scale
+2. **Experience Relevance (40 pts / 20%)** - Years, industry alignment, role progression (5-level scoring)
+3. **Demonstrated Impact (60 pts / 30%)** - Achievements with quantified outcomes and metrics
+4. **Credentials (20 pts / 10%)** - Education, certifications, and formal qualifications
+5. **Fit & Readiness (30 pts / 15%)** - Cultural alignment, availability, and role-specific readiness
+
+**ENFORCEMENT CHECK**: After creating the rubric, verify:
+- Role variant selected and documented (Technical IC / Manager / Executive)
+- Point allocations match selected variant
+- Alignment Statement with construct definition
+- Critical Barriers table with explicit thresholds
+- Confidence Flagging protocol included
+- Skills scored on proficiency (0-6), NOT years
+- No redundancy between categories (years only in Experience, achievements only in Impact)
+- Each skill has 7-level scoring with anchor examples
+- Experience section has 5-level scoring without years-in-skill overlap
+- Demonstrated Impact has quantified thresholds
+
+**FAILURE TO INCLUDE DETAILED BREAKDOWNS VIOLATES THE COMMAND REQUIREMENTS**
+
+### 3.5 Validate and Save Dynamic Rubric
+
+**MANDATORY QUALITY CHECK**: Before saving, verify the rubric includes ALL required detailed breakdowns:
+- Every required skill has 7-level proficiency scoring (0-6) with specific anchor examples
+- Every preferred skill has proficiency-based scoring with role-specific thresholds
+- Experience sections have 5-level detailed scoring breakdowns without years-in-skill overlap
+- Demonstrated Impact has 5-level scoring with quantitative thresholds
+- Credentials have detailed multi-level scoring
+- Fit & Readiness has comprehensive evaluation criteria and scoring levels
+- Critical Barriers table documents knockout criteria
+- Role variant weights are correctly applied
+
+**IF ANY SECTION LACKS DETAILED BREAKDOWNS, THE RUBRIC IS INCOMPLETE AND MUST BE REGENERATED**
+
+Save the generated rubric to: `{applications_root}/{app_slug}/assessment/rubric.md`
+
+> **Task:** Mark task 5 `completed`.
+
+---
+
+## PHASE 4: SCORE CANDIDATE (Sequential - needs rubric + candidate data)
+
+> **Prerequisites:** Rubric (task 5) AND source reading (task 3) must both be `completed`.
+
+### 4.1 Load Candidate Materials
+
+**Load candidate materials (depends on source type):**
+- **If single file**: Candidate data is already in-hand from Phase 2 — no additional reads required.
+- **If folder**: Source files are already read from `{config.directories.resume_source}/` in Phase 2 — use those directly for scoring.
+
+**Evidence Verification Protocol** (from the evidence verification framework template):
+
+Score each rubric category against the source files you read in Phase 2. For each score, cite the specific source `{filepath}:{line_number}` you anchored on. Do not invent enums (proficiency_level, company_size, impact_category) — judge from the source prose with citation.
+
+### 4.2 Score Skills Inventory (Category 1)
+
+> **Task:** Mark task 6 `in_progress`.
+
+Map each required/preferred skill from the custom rubric to specific evidence in candidate's history using 0-6 proficiency scale.
+
+**Score each criterion with confidence level:**
+| Criterion | Score | Confidence | Evidence Citation |
+|-----------|-------|------------|-------------------|
+| [Skill 1] | X/6 | HIGH/MED/LOW | "exact quote" or inference note |
+
+> **Task:** Mark task 6 `completed`.
+
+### 4.3 Score Experience Relevance (Category 2)
+
+> **Task:** Mark task 7 `in_progress`.
+
+Evaluate against the specific years, industry, and domain requirements identified in the rubric (5-level scoring).
+
+> **Task:** Mark task 7 `completed`.
+
+### 4.4 Score Demonstrated Impact (Category 3)
+
+> **Task:** Mark task 8 `in_progress`.
+
+Verify quantified achievements against the expected outcomes defined in the rubric. This is the highest-weighted category - be thorough.
+
+> **Task:** Mark task 8 `completed`.
+
+### 4.5 Score Credentials (Category 4)
+
+> **Task:** Mark task 9 `in_progress`.
+
+Check against the specific education and certification requirements listed in the custom rubric.
+
+> **Task:** Mark task 9 `completed`.
+
+### 4.6 Score Fit & Readiness (Category 5)
+
+> **Task:** Mark task 10 `in_progress`.
+
+Assess based on the company values, work environment, and role-specific readiness factors.
+
+**Normalized Score Calculation:**
+- Raw Score: Sum of all category scores (max 200)
+- Normalized Score: (Raw Score / 200) x 100%
+
+> **Task:** Mark task 10 `completed`.
+
+---
+
+## PHASE 5: REPORT AND SAVE
+
+### 5.1 Generate Comprehensive Report
+
+> **Task:** Mark task 11 `in_progress`.
+
+**CRITICAL**: Follow the report structure defined in the assessment report structure template exactly. Use the detailed 3-level format with rubric criteria attribution for all scores.
+
+**Required Report Elements:**
+- Executive Summary with normalized score and role variant
+- Category-by-category scoring with confidence flags
+- Evidence citations for all scores
+- Critical Barriers assessment (pass/fail for each barrier)
+- Gap analysis with severity ratings
+- Recommendation with confidence level
+
+> **Task:** Mark task 11 `completed`.
+
+### 5.2 Save Assessment and Rubric
+
+> **Task:** Mark task 12 `in_progress`.
+
+**File Save Locations (app-centric layout):**
+
+Resolve `{app_slug}` per the Application Path Resolution protocol at the top of this skill, and ensure `{applications_root}/{app_slug}/assessment/` exists (`mkdir -p`).
+
+1. **Save Dynamic Rubric**: `{applications_root}/{app_slug}/assessment/rubric.md`
+   - Include all extracted requirements from the job posting
+   - Document the scoring breakdown with job-specific details
+
+2. **Save Assessment Report**: `{applications_root}/{app_slug}/assessment/assessment.md`
+   - Include reference to the specific rubric used
+   - Document all scores with evidence mapping and confidence flags
+   - Provide clear traceability between rubric criteria and candidate evaluation
+
+3. **Verify Domain Research**: `{applications_root}/{app_slug}/assessment/domain_research.md`
+   - Already written in Phase 2 §2.2.1; confirm the file exists.
+   - If it is missing (e.g. a resumed run that skipped Phase 2), write it now from the research summary held in context, using the **Domain research file** YAML front matter block.
+
+No timestamped audit sub-folder is required — the app folder itself is the self-contained audit container. After this skill runs, `assessment/` holds three artifacts — `domain_research.md`, `rubric.md`, and `assessment.md` — and the pinned `job_posting.md` copy guarantees the JD cannot drift after the fact.
+
+**Save Steps:**
+1. Compute `{app_slug}` from the job-posting filename (or `--app=<slug>` override)
+2. `mkdir -p {applications_root}/{app_slug}/assessment/`
+3. Pin the JD: copy `{config.directories.job_postings}/{{ARG1}}` to `{applications_root}/{app_slug}/job_posting.md` if not already present
+4. Write the rubric to `{applications_root}/{app_slug}/assessment/rubric.md`
+5. Write the assessment to `{applications_root}/{app_slug}/assessment/assessment.md`
+
+> **Task:** Mark task 12 `completed`.
+
+---
+
+## Validation Requirements
+
+Before finalizing assessment:
+1. **Rubric Completeness Check**: Verify the rubric contains all required detailed scoring breakdowns
+2. **Role Variant Verification**: Confirm role variant is documented and weights match
+3. **Alignment Verification**: Confirm rubric matches the job posting requirements
+4. **Evidence Mapping**: Ensure every score has corresponding evidence from candidate materials
+5. **Confidence Flagging**: Verify all scores include HIGH/MED/LOW confidence indicators
+6. **Consistency Review**: Check that scoring follows rubric criteria without deviation
+7. **Documentation Audit**: Verify clear traceability from rubric criteria to assigned scores
+
+## Error Handling
+
+If issues are encountered:
+- **Missing Job Posting**: Report if job posting file cannot be found and suggest available alternatives
+- **Incomplete Job Posting**: Note any missing critical information and document assumptions made
+- **Insufficient Candidate Data**: Document where candidate evidence is limited for fair assessment
+- **Domain Knowledge Gaps**: Flag areas where additional research or expertise would improve assessment accuracy
+
+## Important Notes
+- **MANDATORY DETAILED SCORING**: Every rubric MUST include the granular scoring breakdowns from the framework rubric. This is not optional - it is required.
+- **200-POINT SYSTEM**: Total score is 200 points; normalize to percentage using (Raw/200) x 100%
+- **ROLE VARIANT SELECTION**: Every assessment must identify and document the appropriate role variant
+- **PROFICIENCY-BASED SKILLS**: Skills use 0-6 proficiency scale, NOT years-based scoring
+- **NO CATEGORY REDUNDANCY**: Years only in Experience Relevance, achievements only in Demonstrated Impact
+- **Dynamic Rubric Creation**: Each job posting generates its own tailored rubric with job-specific criteria but framework-level detail
+- **Complete Scoring Levels**: All sections must include the detailed point breakdowns with specific anchor examples
+- **Role-Specific Adaptation**: Customize the content and thresholds for the specific role while maintaining scoring structure depth
+- **Consistency**: Use the template framework as the foundation but customize content to job requirements
+- **Traceability**: Always reference which rubric was used for which assessment
+- **Objectivity**: Be evidence-based in scoring using the job-specific criteria with detailed justification
+- **Domain Research**: Domain research informs rubric calibration - thresholds and weights should reflect industry reality
+- **Documentation**: Save the domain research, rubric, and assessment for a complete audit trail
+- **Confidence Levels**: All scores must include HIGH/MED/LOW confidence flags
+- **Quality Control**: The generated rubric must be as detailed as the framework rubric - no shortcuts or simplified versions allowed
+
+## CRITICAL ENFORCEMENT RULES
+
+**ABSOLUTE REQUIREMENTS FOR EVERY RUBRIC:**
+1. **ROLE VARIANT** must be selected and weights adjusted accordingly
+2. **SKILLS** use 0-6 proficiency scale (7 levels), NOT years-based
+3. **NO REDUNDANCY**: Years only in Experience Relevance, achievements only in Demonstrated Impact
+4. **DEMONSTRATED IMPACT** is highest-weighted category (25-35% depending on variant)
+5. **CONFIDENCE FLAGS** required for all scores in assessment
+6. **CRITICAL BARRIERS** table with explicit thresholds and consequences
+7. **NORMALIZED SCORE** = Raw/200 x 100%
+
+**VIOLATION CONSEQUENCES:**
+- Any rubric missing detailed breakdowns is INCOMPLETE and violates the command specification
+- You must regenerate the rubric if any section lacks granular scoring
+- Simplified or abbreviated rubrics are NOT ACCEPTABLE
+- The rubric must be as detailed as the embedded template - no exceptions
+
+**VERIFICATION CHECKLIST - BEFORE SAVING ANY RUBRIC:**
+- [ ] Role variant selected and documented (Technical IC / People Manager / Executive)
+- [ ] Point allocations match selected variant (total = 200)
+- [ ] Every skill has 7-level proficiency scoring (0-6) with specific anchor examples
+- [ ] Experience section has 5-level scoring without years-in-skill overlap
+- [ ] Demonstrated Impact has quantified thresholds and is highest-weighted
+- [ ] Critical Barriers table with explicit thresholds included
+- [ ] Alignment Statement with construct definition present
+- [ ] No redundancy between categories
+- [ ] Confidence flagging protocol documented
